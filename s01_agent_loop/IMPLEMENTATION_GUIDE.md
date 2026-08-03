@@ -1,8 +1,8 @@
-# s01_agent_loop/code.py 重写指南
+# s01_agent_loop/s01_code.py 重写指南
 
 ## 背景
 
-目标：**从 0 手动重写** `s01_agent_loop/code.py`，在保持手动 agent loop 教育核心的同时，升级到最新的 SDK 用法（streaming、typed exceptions）。使用 DeepSeek Flash 模型。
+目标：**从 0 手动重写** `s01_agent_loop/s01_code.py`，在保持手动 agent loop 教育核心的同时，升级到最新的 SDK 用法（streaming、typed exceptions）。使用 DeepSeek Flash 模型。
 
 ## 架构
 

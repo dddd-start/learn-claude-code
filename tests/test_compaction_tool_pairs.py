@@ -9,9 +9,9 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 MODULES = {
-    "s08": REPO_ROOT / "s08_context_compact" / "code.py",
-    "s09": REPO_ROOT / "s09_memory" / "code.py",
-    "s20": REPO_ROOT / "s20_comprehensive" / "code.py",
+    "s08": REPO_ROOT / "s08_context_compact" / "s08_code.py",
+    "s09": REPO_ROOT / "s09_memory" / "s09_code.py",
+    "s20": REPO_ROOT / "s20_comprehensive" / "s20_code.py",
 }
 
 

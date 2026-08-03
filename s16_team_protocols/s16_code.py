@@ -2,7 +2,7 @@
 """
 s16: Team Protocols — request-response protocol + request_id + dispatch + state machine.
 
-Run:  python s16_team_protocols/code.py
+Run:  python s16_team_protocols/s16_code.py
 Need: pip install anthropic python-dotenv + .env with ANTHROPIC_API_KEY
 
 Changes from s15:

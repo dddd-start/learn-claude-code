@@ -9,11 +9,11 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 COURSE_MODULES = [
-    ("s05", REPO_ROOT / "s05_todo_write" / "code.py"),
-    ("s06", REPO_ROOT / "s06_subagent" / "code.py"),
-    ("s07", REPO_ROOT / "s07_skill_loading" / "code.py"),
-    ("s08", REPO_ROOT / "s08_context_compact" / "code.py"),
-    ("s20", REPO_ROOT / "s20_comprehensive" / "code.py"),
+    ("s05", REPO_ROOT / "s05_todo_write" / "s05_code.py"),
+    ("s06", REPO_ROOT / "s06_subagent" / "s06_code.py"),
+    ("s07", REPO_ROOT / "s07_skill_loading" / "s07_code.py"),
+    ("s08", REPO_ROOT / "s08_context_compact" / "s08_code.py"),
+    ("s20", REPO_ROOT / "s20_comprehensive" / "s20_code.py"),
 ]
 
 

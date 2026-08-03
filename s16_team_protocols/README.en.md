@@ -201,7 +201,7 @@ Shutdown handshake complete: request → confirm → shutdown. Every step tracke
 
 ```sh
 cd learn-claude-code
-python s16_team_protocols/code.py
+python s16_team_protocols/s16_code.py
 ```
 
 Try these prompts:

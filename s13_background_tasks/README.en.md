@@ -197,7 +197,7 @@ The agent didn't wait — while npm install ran in the background, it read the c
 
 ```sh
 cd learn-claude-code
-python s13_background_tasks/code.py
+python s13_background_tasks/s13_code.py
 ```
 
 Try these prompts:

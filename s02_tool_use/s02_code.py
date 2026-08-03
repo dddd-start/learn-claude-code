@@ -2,7 +2,7 @@
 """
 s02: Tool Use — 在 s01 基础上新增 4 个工具 + 分发映射。
 
-运行: python s02_tool_use/code.py
+运行: python s02_tool_use/s02_code.py
 需要: pip install anthropic python-dotenv + .env 中配置 ANTHROPIC_API_KEY
 
 本文件 = s01 的全部代码 + 以下新增:

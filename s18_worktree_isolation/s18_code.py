@@ -1,24 +1,29 @@
 #!/usr/bin/env python3
 """
-s19: MCP Tools — MCPClient + tool discovery + assemble_tool_pool.
+s18: Worktree Isolation — git worktree + task-directory binding + event log.
 
-Run:  python s19_mcp_plugin/code.py
+Run:  python s18_worktree_isolation/s18_code.py
 Need: pip install anthropic python-dotenv + .env with ANTHROPIC_API_KEY
 
-Changes from s18:
-  - MCPClient class: discovers tools, calls tools via mock handler
-  - normalize_mcp_name: normalize tool/server names
-  - assemble_tool_pool: assembles builtin + MCP tools into one pool
-  - connect_mcp: connect to an MCP server, discover tools
-  - Tool naming: mcp__{server}__{tool} with normalization
-  - MCP tools have readOnly/destructive annotations
-  - agent_loop uses dynamic tool pool (builtin + MCP), no prompt cache
-  - Teammate tools: complete_task, worktree cwd (from s17/s18 fixes)
+Changes from s17:
+  - Task dataclass gains worktree field (str | None)
+  - validate_worktree_name: reject path traversal and illegal chars
+  - create_worktree: validate name, git worktree add, optional task binding
+  - bind_task_to_worktree: write worktree field only, keep task pending
+  - remove_worktree: safety check before force, no auto-complete
+  - run_git returns (ok, output), events only on success
+  - Teammate tools: + complete_task, run in worktree cwd when bound
+  - scan_unclaimed_tasks: uses can_start() for dependency checking
+  - idle_poll: checks claim result, dispatches shutdown in IDLE
+  - consume_lead_inbox: unified inbox consumer
+  - 3 new Lead tools: create_worktree, remove_worktree, keep_worktree
 
-ASCII flow:
-  connect_mcp("docs") → MCPClient discovers tools →
-  assemble_tool_pool → [builtin... , mcp__docs__search, mcp__docs__get_version]
-  agent_loop uses assembled pool
+ASCII topology:
+  Main repo (/)
+    ├── .worktrees/auth/  (branch: wt/auth)  ← Task #1
+    ├── .worktrees/ui/    (branch: wt/ui)     ← Task #2
+    ├── .tasks/task_xxx.json (worktree: "auth")
+    └── .worktrees/events.jsonl
 """
 
 import os, subprocess, json, time, random, threading, re
@@ -43,7 +48,7 @@ WORKDIR = Path.cwd()
 client = Anthropic(base_url=os.getenv("ANTHROPIC_BASE_URL"))
 MODEL = os.environ["MODEL_ID"]
 
-# ── Task System ──
+# ── Task System (from s12 + s18 worktree field) ──
 
 TASKS_DIR = WORKDIR / ".tasks"
 TASKS_DIR.mkdir(exist_ok=True)
@@ -57,7 +62,7 @@ class Task:
     status: str
     owner: str | None
     blockedBy: list[str]
-    worktree: str | None = None
+    worktree: str | None = None      # s18: bound worktree name
 
 
 def _task_path(task_id: str) -> Path:
@@ -90,7 +95,8 @@ def list_tasks() -> list[Task]:
 
 
 def get_task_json(task_id: str) -> str:
-    return json.dumps(asdict(load_task(task_id)), indent=2)
+    task = load_task(task_id)
+    return json.dumps(asdict(task), indent=2)
 
 
 def can_start(task_id: str) -> bool:
@@ -139,7 +145,7 @@ def complete_task(task_id: str) -> str:
     return msg
 
 
-# ── Worktree System ──
+# ── Worktree System (s18 new) ──
 
 WORKTREES_DIR = WORKDIR / ".worktrees"
 WORKTREES_DIR.mkdir(exist_ok=True)
@@ -148,9 +154,10 @@ VALID_WT_NAME = re.compile(r'^[A-Za-z0-9._-]{1,64}$')
 
 
 def validate_worktree_name(name: str) -> str | None:
+    """Return error message if invalid, None if valid."""
     if not name:
         return "Worktree name cannot be empty"
-    if name in (".", ".."):
+    if name == "." or name == "..":
         return f"'{name}' is not a valid worktree name"
     if not VALID_WT_NAME.match(name):
         return (f"Invalid worktree name '{name}': "
@@ -159,16 +166,19 @@ def validate_worktree_name(name: str) -> str | None:
 
 
 def run_git(args: list[str]) -> tuple[bool, str]:
+    """Run git command. Return (ok, output)."""
     try:
         r = subprocess.run(["git"] + args, cwd=WORKDIR,
                            capture_output=True, text=True, timeout=30)
         out = (r.stdout + r.stderr).strip()
-        return r.returncode == 0, out[:5000] if out else "(no output)"
+        out = out[:5000] if out else "(no output)"
+        return r.returncode == 0, out
     except subprocess.TimeoutExpired:
         return False, "Error: git timeout"
 
 
 def log_event(event_type: str, worktree_name: str, task_id: str = ""):
+    """Append a lifecycle event to events.jsonl."""
     event = {"type": event_type, "worktree": worktree_name,
              "task_id": task_id, "ts": time.time()}
     events_file = WORKTREES_DIR / "events.jsonl"
@@ -177,6 +187,7 @@ def log_event(event_type: str, worktree_name: str, task_id: str = ""):
 
 
 def create_worktree(name: str, task_id: str = "") -> str:
+    """Create a git worktree with a dedicated branch. Optionally bind to a task."""
     err = validate_worktree_name(name)
     if err:
         return f"Error: {err}"
@@ -194,12 +205,15 @@ def create_worktree(name: str, task_id: str = "") -> str:
 
 
 def bind_task_to_worktree(task_id: str, worktree_name: str):
+    """Write worktree field to task. Keep status as pending for auto-claim."""
     task = load_task(task_id)
     task.worktree = worktree_name
     save_task(task)
+    print(f"  \033[33m[bind] {task.subject} → worktree:{worktree_name}\033[0m")
 
 
 def _count_worktree_changes(path: Path) -> tuple[int, int]:
+    """Count uncommitted files and commits in a worktree."""
     try:
         r1 = subprocess.run(["git", "status", "--porcelain"],
                             cwd=path, capture_output=True, text=True, timeout=10)
@@ -213,6 +227,7 @@ def _count_worktree_changes(path: Path) -> tuple[int, int]:
 
 
 def remove_worktree(name: str, discard_changes: bool = False) -> str:
+    """Remove worktree. Refuses if uncommitted changes unless discard_changes."""
     err = validate_worktree_name(name)
     if err:
         return err
@@ -222,13 +237,16 @@ def remove_worktree(name: str, discard_changes: bool = False) -> str:
     if not discard_changes:
         files, commits = _count_worktree_changes(path)
         if files < 0:
-            return "Cannot verify status. Use discard_changes=true to force."
+            return (f"Cannot verify worktree '{name}' status. "
+                    "Use discard_changes=true to force removal.")
         if files > 0 or commits > 0:
-            return (f"Worktree '{name}' has {files} file(s), {commits} commit(s). "
-                    "Use discard_changes=true or keep_worktree.")
+            return (f"Worktree '{name}' has {files} uncommitted file(s) "
+                    f"and {commits} unpushed commit(s). "
+                    "Use discard_changes=true to force removal, "
+                    "or keep_worktree to preserve for review.")
     ok1, _ = run_git(["worktree", "remove", str(path), "--force"])
     if not ok1:
-        return f"Failed to remove worktree '{name}'"
+        return f"Failed to remove worktree directory for '{name}'"
     run_git(["branch", "-D", f"wt/{name}"])
     log_event("remove", name)
     print(f"  \033[33m[worktree] removed: {name}\033[0m")
@@ -236,14 +254,16 @@ def remove_worktree(name: str, discard_changes: bool = False) -> str:
 
 
 def keep_worktree(name: str) -> str:
+    """Keep worktree for manual review. Branch preserved."""
     err = validate_worktree_name(name)
     if err:
         return err
     log_event("keep", name)
+    print(f"  \033[36m[worktree] kept: {name}\033[0m")
     return f"Worktree '{name}' kept for review (branch: wt/{name})"
 
 
-# ── Prompt Assembly ──
+# ── Prompt Assembly (from s10) ──
 
 PROMPT_SECTIONS = {
     "identity": "You are a coding agent. Act, don't explain.",
@@ -251,8 +271,7 @@ PROMPT_SECTIONS = {
              "create_task, list_tasks, get_task, claim_task, complete_task, "
              "spawn_teammate, send_message, check_inbox, "
              "request_shutdown, request_plan, review_plan, "
-             "create_worktree, remove_worktree, keep_worktree, "
-             "connect_mcp. MCP tools are prefixed mcp__{server}__{tool}.",
+             "create_worktree, remove_worktree, keep_worktree.",
     "workspace": f"Working directory: {WORKDIR}",
     "memory": "Relevant memories are injected below when available.",
 }
@@ -264,10 +283,19 @@ def assemble_system_prompt(context: dict) -> str:
                 PROMPT_SECTIONS["workspace"]]
     if context.get("memories"):
         sections.append(f"Relevant memories:\n{context['memories']}")
-    mcp_names = list(mcp_clients.keys())
-    if mcp_names:
-        sections.append(f"Connected MCP servers: {', '.join(mcp_names)}")
     return "\n\n".join(sections)
+
+
+_last_context_hash, _last_prompt = None, None
+
+
+def get_system_prompt(context: dict) -> str:
+    global _last_context_hash, _last_prompt
+    h = json.dumps(context, sort_keys=True)
+    if h == _last_context_hash and _last_prompt:
+        return _last_prompt
+    _last_context_hash, _last_prompt = h, assemble_system_prompt(context)
+    return _last_prompt
 
 
 # ── Basic Tools ──
@@ -310,7 +338,7 @@ def run_write(path: str, content: str, cwd: Path = None) -> str:
         return f"Error: {e}"
 
 
-# ── MessageBus ──
+# ── MessageBus (from s15) ──
 
 MAILBOX_DIR = WORKDIR / ".mailboxes"
 MAILBOX_DIR.mkdir(exist_ok=True)
@@ -341,7 +369,7 @@ class MessageBus:
 BUS = MessageBus()
 active_teammates: dict[str, bool] = {}
 
-# ── Protocol State ──
+# ── Protocol State (from s16) ──
 
 @dataclass
 class ProtocolState:
@@ -364,12 +392,21 @@ def new_request_id() -> str:
 def match_response(response_type: str, request_id: str, approve: bool):
     state = pending_requests.get(request_id)
     if not state:
+        print(f"  \033[31m[protocol] unknown request_id: {request_id}\033[0m")
         return
     if state.type == "shutdown" and response_type != "shutdown_response":
+        print(f"  \033[31m[protocol] type mismatch: expected shutdown_response, "
+              f"got {response_type}\033[0m")
         return
     if state.type == "plan_approval" and response_type != "plan_approval_response":
+        print(f"  \033[31m[protocol] type mismatch: expected plan_approval_response, "
+              f"got {response_type}\033[0m")
         return
     state.status = "approved" if approve else "rejected"
+    icon = "✓" if approve else "✗"
+    color = "32" if approve else "31"
+    print(f"  \033[{color}m[protocol] {state.type} {icon} "
+          f"({request_id}: {state.status})\033[0m")
 
 
 def consume_lead_inbox(route_protocol=True) -> list[dict]:
@@ -384,13 +421,14 @@ def consume_lead_inbox(route_protocol=True) -> list[dict]:
     return msgs
 
 
-# ── Autonomous Agent ──
+# ── Autonomous Agent (from s17, + worktree cwd) ──
 
 IDLE_POLL_INTERVAL = 5
 IDLE_TIMEOUT = 60
 
 
 def scan_unclaimed_tasks() -> list[dict]:
+    """Find pending, unowned tasks with all dependencies completed."""
     unclaimed = []
     for f in sorted(TASKS_DIR.glob("task_*.json")):
         task = json.loads(f.read_text())
@@ -402,21 +440,28 @@ def scan_unclaimed_tasks() -> list[dict]:
 
 
 def idle_poll(agent_name: str, messages: list,
-              name: str, role: str) -> str:
+              name: str, role: str) -> tuple[str, str | None]:
+    """Poll for 60s. Return (result, auto_claimed_task_id)."""
     for _ in range(IDLE_TIMEOUT // IDLE_POLL_INTERVAL):
         time.sleep(IDLE_POLL_INTERVAL)
+
         inbox = BUS.read_inbox(agent_name)
         if inbox:
             for msg in inbox:
                 if msg.get("type") == "shutdown_request":
                     req_id = msg.get("metadata", {}).get("request_id", "")
-                    BUS.send(name, "lead", "Shutting down.",
+                    BUS.send(name, "lead", "Shutting down gracefully.",
                              "shutdown_response",
                              {"request_id": req_id, "approve": True})
-                    return "shutdown"
+                    print(f"  \033[35m[protocol] {name} approved shutdown "
+                          f"in idle ({req_id})\033[0m")
+                    return "shutdown", None
+
             messages.append({"role": "user",
                 "content": "<inbox>" + json.dumps(inbox) + "</inbox>"})
-            return "work"
+            print(f"  \033[36m[idle] {name} found inbox messages\033[0m")
+            return "work", None
+
         unclaimed = scan_unclaimed_tasks()
         if unclaimed:
             task_data = unclaimed[0]
@@ -424,15 +469,22 @@ def idle_poll(agent_name: str, messages: list,
             if "Claimed" in result:
                 wt_info = ""
                 if task_data.get("worktree"):
-                    wt_info = f"\nWork directory: {WORKTREES_DIR / task_data['worktree']}"
+                    wt_path = WORKTREES_DIR / task_data["worktree"]
+                    wt_info = f"\nWork directory: {wt_path}"
                 messages.append({"role": "user",
                     "content": f"<auto-claimed>Task {task_data['id']}: "
                                f"{task_data['subject']}{wt_info}</auto-claimed>"})
-                return "work"
-    return "timeout"
+                print(f"  \033[32m[idle] {name} auto-claimed: "
+                      f"{task_data['subject']}\033[0m")
+                return "work", task_data["id"]
+            print(f"  \033[33m[idle] {name} claim failed: "
+                  f"{result}\033[0m")
+
+    print(f"  \033[31m[idle] {name} timeout ({IDLE_TIMEOUT}s)\033[0m")
+    return "timeout", None
 
 
-# ── Teammate Thread ──
+# ── Teammate Thread (from s15 + s16 + s17 + s18) ──
 
 def spawn_teammate_thread(name: str, role: str, prompt: str) -> str:
     if name in active_teammates:
@@ -440,28 +492,37 @@ def spawn_teammate_thread(name: str, role: str, prompt: str) -> str:
 
     system = (f"You are '{name}', a {role}. "
               f"Use tools to complete tasks. "
+              f"You can list and claim tasks from the board. "
               f"If a task has a worktree, work in that directory.")
 
     def handle_inbox_message(name: str, msg: dict, messages: list):
         msg_type = msg.get("type", "message")
         meta = msg.get("metadata", {})
         req_id = meta.get("request_id", "")
+
         if msg_type == "shutdown_request":
-            BUS.send(name, "lead", "Shutting down.",
+            BUS.send(name, "lead", "Shutting down gracefully.",
                      "shutdown_response",
                      {"request_id": req_id, "approve": True})
+            print(f"  \033[35m[protocol] {name} approved shutdown "
+                  f"({req_id})\033[0m")
             return True
+
         if msg_type == "plan_approval_response":
             approve = meta.get("approve", False)
-            messages.append({"role": "user",
-                "content": "[Plan approved]" if approve
-                           else f"[Plan rejected] {msg['content']}"})
+            if approve:
+                messages.append({"role": "user",
+                    "content": "[Plan approved] Proceed with the task."})
+            else:
+                messages.append({"role": "user",
+                    "content": f"[Plan rejected] Feedback: {msg['content']}"})
         return False
 
     def run():
+        # Track current worktree for this teammate's cwd
         wt_ctx = {"path": None}
 
-        def _wt_cwd():
+        def _wt_cwd() -> Path | None:
             p = wt_ctx["path"]
             return Path(p) if p else None
 
@@ -486,9 +547,12 @@ def spawn_teammate_thread(name: str, role: str, prompt: str) -> str:
         def _run_claim_task(task_id: str):
             result = claim_task(task_id, owner=name)
             if "Claimed" in result:
+                # Set worktree cwd if task has one
                 task = load_task(task_id)
-                wt_ctx["path"] = (str(WORKTREES_DIR / task.worktree)
-                                  if task.worktree else None)
+                if task.worktree:
+                    wt_ctx["path"] = str(WORKTREES_DIR / task.worktree)
+                else:
+                    wt_ctx["path"] = None
             return result
 
         def _run_complete_task(task_id: str):
@@ -523,7 +587,7 @@ def spawn_teammate_thread(name: str, role: str, prompt: str) -> str:
                               "properties": {"plan": {"type": "string"}},
                               "required": ["plan"]}},
             {"name": "list_tasks",
-             "description": "List all tasks.",
+             "description": "List all tasks on the board.",
              "input_schema": {"type": "object", "properties": {},
                               "required": []}},
             {"name": "claim_task",
@@ -549,11 +613,14 @@ def spawn_teammate_thread(name: str, role: str, prompt: str) -> str:
             "complete_task": _run_complete_task,
         }
 
+        # Outer loop: WORK → IDLE cycle
         while True:
             if len(messages) <= 3:
                 messages.insert(0, {"role": "user",
                     "content": f"<identity>You are '{name}', role: {role}. "
                                f"Continue your work.</identity>"})
+
+            # WORK phase
             should_shutdown = False
             for _ in range(10):
                 inbox = BUS.read_inbox(name)
@@ -570,6 +637,7 @@ def spawn_teammate_thread(name: str, role: str, prompt: str) -> str:
                     if non_protocol:
                         messages.append({"role": "user",
                             "content": "<inbox>" + json.dumps(non_protocol) + "</inbox>"})
+
                 try:
                     response = client.messages.create(
                         model=MODEL, system=system, messages=messages[-20:],
@@ -588,12 +656,24 @@ def spawn_teammate_thread(name: str, role: str, prompt: str) -> str:
                                         "tool_use_id": block.id,
                                         "content": str(output)})
                 messages.append({"role": "user", "content": results})
+
             if should_shutdown:
                 break
-            idle_result = idle_poll(name, messages, name, role)
-            if idle_result in ("shutdown", "timeout"):
-                break
 
+            # IDLE phase
+            idle_result, claimed_task_id = idle_poll(name, messages, name, role)
+            if idle_result == "shutdown":
+                break
+            if idle_result == "timeout":
+                break
+            if idle_result == "work" and claimed_task_id:
+                task = load_task(claimed_task_id)
+                if task.get("worktree"):
+                    wt_ctx["path"] = str(WORKTREES_DIR / task["worktree"])
+                else:
+                    wt_ctx["path"] = None
+
+        # Summary
         summary = "Done."
         for msg in reversed(messages):
             if msg["role"] == "assistant" and isinstance(msg["content"], list):
@@ -606,10 +686,12 @@ def spawn_teammate_thread(name: str, role: str, prompt: str) -> str:
                 break
         BUS.send(name, "lead", summary, "result")
         active_teammates.pop(name, None)
+        print(f"  \033[32m[teammate] {name} finished\033[0m")
 
     active_teammates[name] = True
     threading.Thread(target=run, daemon=True).start()
-    return f"Teammate '{name}' spawned as {role}"
+    print(f"  \033[36m[teammate] {name} spawned as {role}\033[0m")
+    return f"Teammate '{name}' spawned as {role} (autonomous)"
 
 
 def _teammate_submit_plan(from_name: str, plan: str) -> str:
@@ -621,10 +703,10 @@ def _teammate_submit_plan(from_name: str, plan: str) -> str:
     BUS.send(from_name, "lead", plan,
              "plan_approval_request",
              {"request_id": req_id})
-    return f"Plan submitted ({req_id})"
+    return f"Plan submitted ({req_id}). Waiting for approval..."
 
 
-# ── Lead Protocol Tools ──
+# ── Lead Protocol Tools (from s16) ──
 
 def run_request_shutdown(teammate: str) -> str:
     req_id = new_request_id()
@@ -632,13 +714,17 @@ def run_request_shutdown(teammate: str) -> str:
         request_id=req_id, type="shutdown",
         sender="lead", target=teammate,
         status="pending", payload="")
-    BUS.send("lead", teammate, "Shut down.", "shutdown_request",
+    BUS.send("lead", teammate, "Please shut down gracefully.",
+             "shutdown_request",
              {"request_id": req_id})
-    return f"Shutdown request sent to {teammate}"
+    print(f"  \033[35m[protocol] shutdown_request → {teammate} "
+          f"({req_id})\033[0m")
+    return f"Shutdown request sent to {teammate} (req: {req_id})"
 
 
 def run_request_plan(teammate: str, task: str) -> str:
-    BUS.send("lead", teammate, f"Submit plan for: {task}", "message")
+    BUS.send("lead", teammate, f"Please submit a plan for: {task}",
+             "message")
     return f"Asked {teammate} to submit a plan"
 
 
@@ -647,136 +733,27 @@ def run_review_plan(request_id: str, approve: bool,
     state = pending_requests.get(request_id)
     if not state:
         return f"Request {request_id} not found"
+    if state.status != "pending":
+        return f"Request {request_id} already {state.status}"
     state.status = "approved" if approve else "rejected"
     BUS.send("lead", state.sender,
              feedback or ("Approved" if approve else "Rejected"),
              "plan_approval_response",
              {"request_id": request_id, "approve": approve})
-    return f"Plan {'approved' if approve else 'rejected'}"
+    icon = "✓" if approve else "✗"
+    print(f"  \033[32m[protocol] plan {icon} ({request_id})\033[0m")
+    return f"Plan {'approved' if approve else 'rejected'} ({request_id})"
 
 
-# ── MCP System (s19 new) ──
-
-class MCPClient:
-    """Discovers and calls tools on an MCP server (mock for teaching)."""
-
-    def __init__(self, name: str):
-        self.name = name
-        self.tools: list[dict] = []
-        self._handlers: dict[str, callable] = {}
-
-    def register(self, tool_defs: list[dict],
-                 handlers: dict[str, callable]):
-        self.tools = tool_defs
-        self._handlers = handlers
-
-    def call_tool(self, tool_name: str, args: dict) -> str:
-        handler = self._handlers.get(tool_name)
-        if not handler:
-            return f"MCP error: unknown tool '{tool_name}'"
-        try:
-            return handler(**args)
-        except Exception as e:
-            return f"MCP error: {e}"
-
-
-mcp_clients: dict[str, MCPClient] = {}
-
-_DISALLOWED_CHARS = re.compile(r'[^a-zA-Z0-9_-]')
-
-
-def normalize_mcp_name(name: str) -> str:
-    """Replace non [a-zA-Z0-9_-] with underscore."""
-    return _DISALLOWED_CHARS.sub('_', name)
-
-
-def _mock_server_docs():
-    client = MCPClient("docs")
-    client.register(
-        tool_defs=[
-            {"name": "search", "description": "Search documentation. (readOnly)",
-             "inputSchema": {"type": "object",
-                             "properties": {"query": {"type": "string"}},
-                             "required": ["query"]}},
-            {"name": "get_version", "description": "Get API version. (readOnly)",
-             "inputSchema": {"type": "object", "properties": {},
-                             "required": []}},
-        ],
-        handlers={
-            "search": lambda query: f"[docs] Found 3 results for '{query}'",
-            "get_version": lambda: "[docs] API v2.1.0",
-        })
-    return client
-
-
-def _mock_server_deploy():
-    client = MCPClient("deploy")
-    client.register(
-        tool_defs=[
-            {"name": "trigger",
-             "description": "Trigger a deployment. (destructive — requires approval in real CC)",
-             "inputSchema": {"type": "object",
-                             "properties": {"service": {"type": "string"}},
-                             "required": ["service"]}},
-            {"name": "status", "description": "Check deployment status. (readOnly)",
-             "inputSchema": {"type": "object",
-                             "properties": {"service": {"type": "string"}},
-                             "required": ["service"]}},
-        ],
-        handlers={
-            "trigger": lambda service: f"[deploy] Triggered: {service}",
-            "status": lambda service: f"[deploy] {service}: running (v1.4.2)",
-        })
-    return client
-
-
-MOCK_SERVERS = {
-    "docs": _mock_server_docs,
-    "deploy": _mock_server_deploy,
-}
-
-
-def connect_mcp(name: str) -> str:
-    if name in mcp_clients:
-        return f"MCP server '{name}' already connected"
-    factory = MOCK_SERVERS.get(name)
-    if not factory:
-        available = ", ".join(MOCK_SERVERS.keys())
-        return f"Unknown server '{name}'. Available: {available}"
-    mcp_client = factory()
-    mcp_clients[name] = mcp_client
-    tool_names = [t["name"] for t in mcp_client.tools]
-    print(f"  \033[31m[mcp] connected: {name} → {tool_names}\033[0m")
-    return (f"Connected to MCP server '{name}'. "
-            f"Discovered {len(mcp_client.tools)} tools: {', '.join(tool_names)}")
-
-
-def assemble_tool_pool() -> tuple[list[dict], dict]:
-    """Assemble builtin tools + all MCP tools into one pool."""
-    tools = list(BUILTIN_TOOLS)
-    handlers = dict(BUILTIN_HANDLERS)
-    for server_name, mcp_client in mcp_clients.items():
-        safe_server = normalize_mcp_name(server_name)
-        for tool_def in mcp_client.tools:
-            safe_tool = normalize_mcp_name(tool_def["name"])
-            prefixed = f"mcp__{safe_server}__{safe_tool}"
-            tools.append({
-                "name": prefixed,
-                "description": tool_def.get("description", ""),
-                "input_schema": tool_def.get("inputSchema", {}),
-            })
-            handlers[prefixed] = (
-                lambda *, c=mcp_client, t=tool_def["name"], **kw: c.call_tool(t, kw))
-    return tools, handlers
-
-
-# ── Lead Worktree Tools ──
+# ── Lead Worktree Tools (s18 new) ──
 
 def run_create_worktree(name: str, task_id: str = "") -> str:
     return create_worktree(name, task_id)
 
+
 def run_remove_worktree(name: str, discard_changes: bool = False) -> str:
     return remove_worktree(name, discard_changes)
+
 
 def run_keep_worktree(name: str) -> str:
     return keep_worktree(name)
@@ -805,18 +782,23 @@ def run_list_tasks() -> str:
 def run_get_task(task_id: str) -> str:
     return get_task_json(task_id)
 
+
 def run_claim_task(task_id: str) -> str:
     return claim_task(task_id, owner="agent")
+
 
 def run_complete_task(task_id: str) -> str:
     return complete_task(task_id)
 
+
 def run_spawn_teammate(name: str, role: str, prompt: str) -> str:
     return spawn_teammate_thread(name, role, prompt)
+
 
 def run_send_message(to: str, content: str) -> str:
     BUS.send("lead", to, content)
     return f"Sent to {to}"
+
 
 def run_check_inbox() -> str:
     msgs = consume_lead_inbox(route_protocol=True)
@@ -830,13 +812,10 @@ def run_check_inbox() -> str:
         lines.append(f"  [{m['from']}]{tag} {m['content'][:200]}")
     return "\n".join(lines)
 
-def run_connect_mcp(name: str) -> str:
-    return connect_mcp(name)
-
 
 # ── Tool Definitions ──
 
-BUILTIN_TOOLS = [
+TOOLS = [
     {"name": "bash", "description": "Run a shell command.",
      "input_schema": {"type": "object",
                       "properties": {"command": {"type": "string"}},
@@ -851,34 +830,41 @@ BUILTIN_TOOLS = [
                       "properties": {"path": {"type": "string"},
                                      "content": {"type": "string"}},
                       "required": ["path", "content"]}},
-    {"name": "create_task", "description": "Create a task.",
+    {"name": "create_task",
+     "description": "Create a task.",
      "input_schema": {"type": "object",
                       "properties": {"subject": {"type": "string"},
                                      "description": {"type": "string"},
                                      "blockedBy": {"type": "array",
                                                    "items": {"type": "string"}}},
                       "required": ["subject"]}},
-    {"name": "list_tasks", "description": "List all tasks.",
+    {"name": "list_tasks",
+     "description": "List all tasks.",
      "input_schema": {"type": "object", "properties": {}, "required": []}},
-    {"name": "get_task", "description": "Get full task details.",
+    {"name": "get_task",
+     "description": "Get full details of a specific task.",
      "input_schema": {"type": "object",
                       "properties": {"task_id": {"type": "string"}},
                       "required": ["task_id"]}},
-    {"name": "claim_task", "description": "Claim a pending task.",
+    {"name": "claim_task",
+     "description": "Claim a pending task.",
      "input_schema": {"type": "object",
                       "properties": {"task_id": {"type": "string"}},
                       "required": ["task_id"]}},
-    {"name": "complete_task", "description": "Complete an in-progress task.",
+    {"name": "complete_task",
+     "description": "Complete an in-progress task.",
      "input_schema": {"type": "object",
                       "properties": {"task_id": {"type": "string"}},
                       "required": ["task_id"]}},
-    {"name": "spawn_teammate", "description": "Spawn an autonomous teammate.",
+    {"name": "spawn_teammate",
+     "description": "Spawn an autonomous teammate agent.",
      "input_schema": {"type": "object",
                       "properties": {"name": {"type": "string"},
                                      "role": {"type": "string"},
                                      "prompt": {"type": "string"}},
                       "required": ["name", "role", "prompt"]}},
-    {"name": "send_message", "description": "Send message to a teammate.",
+    {"name": "send_message",
+     "description": "Send message to a teammate.",
      "input_schema": {"type": "object",
                       "properties": {"to": {"type": "string"},
                                      "content": {"type": "string"}},
@@ -887,12 +873,12 @@ BUILTIN_TOOLS = [
      "description": "Check inbox for messages and protocol responses.",
      "input_schema": {"type": "object", "properties": {}, "required": []}},
     {"name": "request_shutdown",
-     "description": "Request a teammate to shut down.",
+     "description": "Request a teammate to shut down gracefully.",
      "input_schema": {"type": "object",
                       "properties": {"teammate": {"type": "string"}},
                       "required": ["teammate"]}},
     {"name": "request_plan",
-     "description": "Ask a teammate to submit a plan.",
+     "description": "Ask a teammate to submit a plan for review.",
      "input_schema": {"type": "object",
                       "properties": {"teammate": {"type": "string"},
                                      "task": {"type": "string"}},
@@ -900,18 +886,20 @@ BUILTIN_TOOLS = [
     {"name": "review_plan",
      "description": "Approve or reject a submitted plan.",
      "input_schema": {"type": "object",
-                      "properties": {"request_id": {"type": "string"},
-                                     "approve": {"type": "boolean"},
-                                     "feedback": {"type": "string"}},
+                      "properties": {
+                          "request_id": {"type": "string"},
+                          "approve": {"type": "boolean"},
+                          "feedback": {"type": "string"}},
                       "required": ["request_id", "approve"]}},
+    # s18 new: worktree tools
     {"name": "create_worktree",
-     "description": "Create an isolated git worktree.",
+     "description": "Create an isolated git worktree with its own branch.",
      "input_schema": {"type": "object",
                       "properties": {"name": {"type": "string"},
                                      "task_id": {"type": "string"}},
                       "required": ["name"]}},
     {"name": "remove_worktree",
-     "description": "Remove a worktree. Refuses if changes exist.",
+     "description": "Remove a worktree. Refuses if uncommitted changes unless discard_changes=true.",
      "input_schema": {"type": "object",
                       "properties": {"name": {"type": "string"},
                                      "discard_changes": {"type": "boolean"}},
@@ -921,14 +909,9 @@ BUILTIN_TOOLS = [
      "input_schema": {"type": "object",
                       "properties": {"name": {"type": "string"}},
                       "required": ["name"]}},
-    {"name": "connect_mcp",
-     "description": "Connect to an MCP server (docs, deploy) and discover tools.",
-     "input_schema": {"type": "object",
-                      "properties": {"name": {"type": "string"}},
-                      "required": ["name"]}},
 ]
 
-BUILTIN_HANDLERS = {
+TOOL_HANDLERS = {
     "bash": run_bash, "read_file": run_read, "write_file": run_write,
     "create_task": run_create_task, "list_tasks": run_list_tasks,
     "get_task": run_get_task,
@@ -940,7 +923,6 @@ BUILTIN_HANDLERS = {
     "create_worktree": run_create_worktree,
     "remove_worktree": run_remove_worktree,
     "keep_worktree": run_keep_worktree,
-    "connect_mcp": run_connect_mcp,
 }
 
 
@@ -957,16 +939,15 @@ def update_context(context: dict, messages: list) -> dict:
     return {"memories": memories}
 
 
-# ── Agent Loop (s19: dynamic tool pool, no prompt cache) ──
+# ── Agent Loop ──
 
 def agent_loop(messages: list, context: dict):
-    tools, handlers = assemble_tool_pool()
-    system = assemble_system_prompt(context)
+    system = get_system_prompt(context)
     while True:
         try:
             response = client.messages.create(
                 model=MODEL, system=system, messages=messages,
-                tools=tools, max_tokens=8000)
+                tools=TOOLS, max_tokens=8000)
         except Exception as e:
             messages.append({"role": "assistant", "content": [
                 {"type": "text", "text": f"[Error] {type(e).__name__}: {e}"}]})
@@ -981,28 +962,24 @@ def agent_loop(messages: list, context: dict):
             if block.type != "tool_use":
                 continue
             print(f"\033[36m> {block.name}\033[0m")
-            handler = handlers.get(block.name)
+            handler = TOOL_HANDLERS.get(block.name)
             output = handler(**block.input) if handler else "Unknown"
             print(str(output)[:300])
             results.append({"type": "tool_result",
                             "tool_use_id": block.id, "content": output})
         messages.append({"role": "user", "content": results})
-
-        if any(b.name == "connect_mcp" for b in response.content
-               if b.type == "tool_use"):
-            tools, handlers = assemble_tool_pool()
-            context = update_context(context, messages)
-            system = assemble_system_prompt(context)
+        context = update_context(context, messages)
+        system = get_system_prompt(context)
 
 
 if __name__ == "__main__":
-    print("s19: mcp tools")
+    print("s18: worktree isolation")
     print("Enter a question, press Enter to send. Type q to quit.\n")
     history = []
     context = {"memories": ""}
     while True:
         try:
-            query = input("\033[36ms19 >> \033[0m")
+            query = input("\033[36ms18 >> \033[0m")
         except (EOFError, KeyboardInterrupt):
             break
         if query.strip().lower() in ("q", "exit", ""):
@@ -1016,6 +993,7 @@ if __name__ == "__main__":
             elif isinstance(block, dict) and block.get("type") == "text":
                 print(block.get("text", ""))
 
+        # Consume lead inbox: route protocol + inject into history
         inbox = consume_lead_inbox(route_protocol=True)
         if inbox:
             inbox_text = "\n".join(

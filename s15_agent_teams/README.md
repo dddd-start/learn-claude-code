@@ -155,7 +155,7 @@ if inbox:
 
 ```sh
 cd learn-claude-code
-python s15_agent_teams/code.py
+python s15_agent_teams/s15_code.py
 ```
 
 试试这些 prompt：

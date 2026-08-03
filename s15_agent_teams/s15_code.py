@@ -2,7 +2,7 @@
 """
 s15: Agent Teams — MessageBus + spawn_teammate_thread + inbox injection.
 
-Run:  python s15_agent_teams/code.py
+Run:  python s15_agent_teams/s15_code.py
 Need: pip install anthropic python-dotenv + .env with ANTHROPIC_API_KEY
 
 Changes from s14:

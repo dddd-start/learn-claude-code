@@ -2,7 +2,7 @@
 """
 s17: Autonomous Agents — idle poll + auto-claim + WORK/IDLE lifecycle.
 
-Run:  python s17_autonomous_agents/code.py
+Run:  python s17_autonomous_agents/s17_code.py
 Need: pip install anthropic python-dotenv + .env with ANTHROPIC_API_KEY
 
 Changes from s16:

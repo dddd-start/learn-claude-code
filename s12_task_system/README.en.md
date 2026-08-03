@@ -205,7 +205,7 @@ Each `create_task` writes a JSON file, each `claim_task` / `complete_task` updat
 
 ```sh
 cd learn-claude-code
-python s12_task_system/code.py
+python s12_task_system/s12_code.py
 ```
 
 Try these prompts:
