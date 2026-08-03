@@ -727,3 +727,34 @@ SDK 流式累积事件时用 `ParsedMessage.construct(...)`（_messages.py:452�
 - `construct_type` / `construct_type_unchecked` — 按类型构建（含 §20 判别联合）
 - `parse_text` 里 `TypeAdapter(output_format).validate_json(text)` — 把文本按指定类型解析（§17）
 - `PropertyInfo(discriminator=...)` — pydantic 判别联合元数据（§20）
+
+## 22. 项目如何引入 pydantic
+
+### 现状：已经装好了
+
+- 本项目用 `requirements.txt` 管理依赖（直接依赖仅 3 个：anthropic / python-dotenv / pyyaml，无 pyproject.toml）
+- pydantic 2.13.4 已作为 **anthropic SDK 的传递依赖** 自动装进 `.venv` —— 直接 `from pydantic import BaseModel` 就能用
+
+### 要不要显式声明？
+
+| 场景 | 建议 |
+|---|---|
+| 只是 SDK 内部用 | 不声明也行（版本随 SDK 浮动） |
+| 自己的代码直接 `import pydantic` | **建议声明** —— 间接依赖不是承诺，SDK 升级可能改版 |
+
+### 命令（Windows + venv）
+
+```bash
+.venv/Scripts/pip install "pydantic>=2,<3"   # 锁 v2：v1/v2 API 不兼容（.dict() vs model_dump()）
+```
+
+然后在 requirements.txt 加一行：
+
+```
+pydantic>=2.13,<3
+```
+
+- 版本区间语法：`>=2.13,<3` = 「大于等于 2.13 且小于 3」
+- 全量快照（含所有传递依赖）：`.venv/Scripts/pip freeze > requirements.txt`
+- 换环境重装：`.venv/Scripts/pip install -r requirements.txt`
+- 验证：`.venv/Scripts/python -c "import pydantic; print(pydantic.__version__)"` → 2.13.4
