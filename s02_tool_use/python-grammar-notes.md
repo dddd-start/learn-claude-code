@@ -758,3 +758,147 @@ pydantic>=2.13,<3
 - 全量快照（含所有传递依赖）：`.venv/Scripts/pip freeze > requirements.txt`
 - 换环境重装：`.venv/Scripts/pip install -r requirements.txt`
 - 验证：`.venv/Scripts/python -c "import pydantic; print(pydantic.__version__)"` → 2.13.4
+
+## 23. `SequenceNotStr` — 「是序列，但不是字符串」
+
+### 这一行是什么
+
+```python
+from .._types import SequenceNotStr        # tool_param.py:8
+required: Optional[SequenceNotStr[str]]    # tool_param.py:25
+```
+
+`required` 是工具输入 JSON schema 的字段，含义是「必填属性名列表」，如 `["name", "age"]`。类型检查器必须拦住你把单个字符串 `"name"` 传进去 —— `SequenceNotStr` 就是干这个的。
+
+### 为什么需要：`str` 本身就是 `Sequence[str]`
+
+在类型系统里，字符串就是「字符序列」，`str` 是 `Sequence[str]` 的合法成员。直接写 `Sequence[str]` 时，`"name"` 也能通过检查；而这里要的是「字符串的列表」，不是「字符串」。
+
+### 实现：一个专门排除 `str` 的 `Protocol`（_types.py:257-275）
+
+```python
+if TYPE_CHECKING:
+    class SequenceNotStr(Protocol[_T_co]):
+        @overload
+        def __getitem__(self, index: SupportsIndex, /) -> _T_co: ...
+        @overload
+        def __getitem__(self, index: slice, /) -> Sequence[_T_co]: ...
+        def __contains__(self, value: object, /) -> bool: ...
+        def __len__(self) -> int: ...
+        def __iter__(self) -> Iterator[_T_co]: ...
+        def __reversed__(self) -> Iterator[_T_co]: ...
+else:
+    SequenceNotStr = Sequence
+```
+
+- **`Protocol`（PEP 544）= 结构子类型**：不用继承，类的方法签名满足这个「形状」就算实现它 —— 类型层面的鸭子类型
+- **排除 `str` 的机关在 `__contains__`**：协议要求「能包含任意对象」（`value: object`）；`str.__contains__` 的签名只接受 `str`、不接受 `object` → `str` 不满足协议 → mypy/pyright 拒绝
+- **故意省略 `index()` 和 `count()`**：源码注释说明，加上它们 pyright 无法正确推断 TypedDict（`dict` 字面量列表赋给 `SequenceNotStr` 的场景）
+- **运行时 = `Sequence`**：`if TYPE_CHECKING` 下协议不存在（§15），直接别名回标准 `Sequence`，反序列化零特殊处理
+- 这个技巧抄自 hauntsaninja/useful_types 库（源码注释里的链接），SDK 原样借鉴
+
+### 联动
+
+- `if TYPE_CHECKING:` = §15 老朋友；`Protocol[_T_co]` 泛型参数化 = §17；`Optional[...]` = §18 的 Union 语法糖
+
+## 24. 注解求值时机 — 没导入的 `Callable` 为什么报错
+
+### 现象
+
+```python
+def regist_tool(tool: dict[str, Callable[[], str]]) -> str:   # Mycode.py:26
+    pass
+```
+
+PyCharm 在第 26 行画红线。这**不是语法错误**（`ast.parse` 能通过），而是静态检查发现 `Callable` 这个名字从未导入 —— 报的是「Unresolved reference」（未解析的引用）。
+
+### 关键：注解什么时候求值（版本差异）
+
+函数注解是**真实表达式**，不是注释 —— 但「什么时候求值」随版本变化：
+
+| Python 版本 | 注解求值时机 | 没导入名字的后果 |
+| --- | --- | --- |
+| ≤ 3.13 | 定义函数时立即求值 | 执行到 def 那行直接 `NameError` |
+| 3.14+（PEP 649 延迟注解） | 延迟到访问 `__annotations__` / `get_type_hints()` 时 | def 能通过，访问注解才炸 |
+
+本机 Python 3.14.4 实测：`def f(x: Callable): pass` 通过；访问 `f.__annotations__` 时报 `NameError: name 'Callable' is not defined`。
+
+口诀：**旧版定义即炸，新版用到才炸，PyCharm 永远先炸。**
+
+### 修复
+
+```python
+from typing import Callable          # 或 3.9+：from collections.abc import Callable
+```
+
+另外 `dict[str, ...]`（PEP 585 内置泛型）需要 Python 3.9+，本机 3.14 没问题。
+
+### 设计注意
+
+`Callable[[], str]` = 「无参数、返回 str」。而本项目的 `bash_run(command: str) -> str` 带参数，所以更贴切的类型是 `Callable[[str], str]`。
+
+### 联动
+
+- `from __future__ import annotations`（§15）也能把求值推迟到 `get_type_hints()`，PEP 649 之后该写法不再必需
+- PyCharm 红线这类静态检查能在运行前抓错误 —— 呼应 §14「运行前校验是谁做的」
+
+## 25. 列表只能用整数下标 — `TypeError: list indices must be integers or slices, not str`
+
+### 现象
+
+```python
+TOOL_HANDLERS = []                                  # Mycode.py:33  ← 列表
+regist_tool({"bash": bash_run})                     # 往列表里 append 一个字典
+result = TOOL_HANDLERS[block.name](**block.input)   # Mycode.py:57  ← 用字符串 "bash" 索引列表
+```
+
+运行时抛：`TypeError: list indices must be integers or slices, not str`。
+
+### 关键：报错消息直接告诉你容器类型
+
+- 列表只接受**整数下标**（`lst[0]`）或**切片**（`lst[1:3]`）
+- 传字符串 → `TypeError`。错误消息里的 `list indices` 就是线索：**当前容器是 list，不是 dict**
+- 代码意图是「工具名 → 函数」的映射（`block.name` 是名字），容器应为 dict：`TOOL_HANDLERS["bash"]` 才能按名字取函数
+- `regist_tool` 的参数注解 `tool: dict[str, Callable[[str], str]]` 也印证了设计意图 —— 类型注解和实际容器不一致时，运行时就是这种炸法
+
+### 修复
+
+```python
+TOOL_HANDLERS: dict[str, Callable[[str], str]] = {}     # [] → {}
+
+def regist_tool(tool: dict[str, Callable[[str], str]]) -> dict[str, Callable[[str], str]]:
+    TOOL_HANDLERS.update(tool)                           # append → update
+    return TOOL_HANDLERS
+```
+
+- `dict.update(其它字典)` 把键值合并进来（`{"bash": bash_run}` 整体并入）—— 原地修改，返回 None
+- `TOOL_HANDLERS["bash"]` 取出函数对象，`(...)` 调用它
+
+### `**block.input` — 把字典解包成关键字参数
+
+```python
+TOOL_HANDLERS[block.name](**block.input)
+# block.input = {"command": "ls"}  → 等价于 bash_run(command="ls")
+```
+
+`**` 在**调用处**把字典的键值对展开成关键字参数；反过来函数定义处 `def f(**kwargs)` 是收集。键必须正好是参数的参数名，否则 `TypeError: unexpected keyword argument`。
+
+### 顺带：同一文件里排查出的同类小坑
+
+```python
+subprocess.run()                      # 缺必填参数 args → TypeError: run() missing 1 required positional argument: 'args'
+subprocess.run(command, shell=True, capture_output=True, text=True)   # ✅
+
+print("occired error:{e}")            # 少 f 前缀 → 打印的是字面量 {e}，不是变量值
+print(f"occired error:{e}")           # ✅
+```
+
+- `subprocess.run()` 第一个参数 `args` 必填；Windows 上用 `shell=True` 让命令走 cmd
+- f-string 的 `f` 前缀**不是装饰**，少了就是普通字符串，`{e}` 原样输出
+- 附带：异常分支里 `response` 未绑定就往下用 → `UnboundLocalError`（try 只管得到赋值前），except 里打印后直接 `return`
+
+### 联动
+
+- 类型注解与实际容器不一致 = §24 的注解问题运行时的另一半：注解只在类型检查层，运行时的真相由实际构造的容器决定
+- 「Python 没有运行前类型校验」= §14 —— 这类错误只能靠运行时报错暴露
+- 报错消息是调试第一手线索：`list indices` / `'str' object is not callable` / `unexpected keyword argument` 分别指向容器类型、调用对象、参数名三种不同的问题
