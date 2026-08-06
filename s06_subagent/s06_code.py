@@ -50,13 +50,13 @@ MODEL = os.environ["MODEL_ID"]
 CURRENT_TODOS: list[dict] = []
 
 SYSTEM = (
-    f"You are a coding agent at {WORKDIR}. "
+    f"You are a coding agent at {WORKDIR} running on Windows. "
     "For complex sub-problems, use the task tool to spawn a subagent."
 )
 
 # s06: subagent gets its own system prompt — no task, no recursion
 SUB_SYSTEM = (
-    f"You are a coding agent at {WORKDIR}. "
+    f"You are a coding agent at {WORKDIR} running on Windows. "
     "Complete the task you were given, then return a concise summary. "
     "Do not delegate further."
 )

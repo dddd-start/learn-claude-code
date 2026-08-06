@@ -456,9 +456,9 @@ def agent_loop(messages: list):
     while True:
         # s08 change: three preprocessors (0 API calls, cheap first)
         # Order matches CC source: budget → snip → micro
-        messages[:] = tool_result_budget(messages)    # L3: persist large results first
-        messages[:] = snip_compact(messages)          # L1: trim middle
-        messages[:] = micro_compact(messages)         # L2: old result placeholders
+        messages[:] = tool_result_budget(messages)    # L3: persist large results first。如果最后一次请求的一批工具调用结果总和大于200kb，就压缩最后一批次工具调用，仅留个文件引用
+        messages[:] = snip_compact(messages)          # L1: trim middle。如果总messages数大于50，压缩中间的对话，但是不能将tool_use\tool_result拆散，要成对保留
+        messages[:] = micro_compact(messages)         # L2: old result placeholders。仅保留最新的3条tool_result
 
         # s08 change: tokens still over threshold → LLM summary (1 API call)
         if estimate_size(messages) > CONTEXT_LIMIT:
