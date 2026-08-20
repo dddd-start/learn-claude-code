@@ -200,6 +200,7 @@ cython_debug/
 .mailboxes/
 .worktrees/
 .scheduled_tasks.json
+.state/
 
 # Accidental root npm lockfile; web/package-lock.json is tracked.
 /package-lock.json

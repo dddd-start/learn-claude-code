@@ -902,3 +902,108 @@ print(f"occired error:{e}")           # ✅
 - 类型注解与实际容器不一致 = §24 的注解问题运行时的另一半：注解只在类型检查层，运行时的真相由实际构造的容器决定
 - 「Python 没有运行前类型校验」= §14 —— 这类错误只能靠运行时报错暴露
 - 报错消息是调试第一手线索：`list indices` / `'str' object is not callable` / `unexpected keyword argument` 分别指向容器类型、调用对象、参数名三种不同的问题
+
+## 26. `asdict` + `json.dumps` + `Path.write_text` — dataclass 持久化三件套
+
+### 这一行是什么
+
+```python
+# s12_code.py:81
+_task_path(task.id).write_text(json.dumps(asdict(task), indent=2))
+```
+
+一个**链式方法调用表达式**。求值顺序：先算**接收者** `_task_path(task.id)`（得到一个 `Path`），再从左到右算参数 `asdict(task)`、`indent=2`，最后调 `Path.write_text(...)`。
+
+数据流由内到外：
+
+```
+Task 实例 ──asdict──▶ dict ──json.dumps──▶ str ──Path.write_text──▶ 磁盘 .tasks/task_xxx.json
+```
+
+### `asdict(task)` — dataclass → dict（递归转换）
+
+`dataclasses.asdict()` 把 dataclass 实例**递归**转成纯内置类型：
+
+```python
+@dataclass
+class Task:
+    id: str
+    subject: str
+    blockedBy: list[str]
+    dep: Dep | None          # 嵌套 dataclass
+
+asdict(t)
+# {'id': 'task_1', 'subject': '写报告', 'blockedBy': ['task_0'], 'dep': {'name': 'a', 'n': 1}}
+#                                               list 转 list     嵌套 Dep 也转成 dict
+```
+
+- **递归**：字段里的 dataclass → dict、list/tuple → list/tuple、dict → dict；其它值深拷贝一份
+- 只接受 dataclass 实例，传普通对象 → `TypeError: asdict() should be called on dataclass instances`
+- 兄弟函数 `astuple()` — 转成 tuple，很少用
+
+### 为什么不能直接 `json.dumps(task)` — 序列化防线
+
+实测：
+
+```python
+json.dumps(t)   # TypeError: Object of type Task is not JSON serializable
+```
+
+- JSON 只认六种内置类型：object(dict) / array(list) / string / number / boolean / null
+- dataclass 实例是任意自定义对象 → `json.dumps` 不认，直接抛 `TypeError`
+- **所以必须先 `asdict` 降级成纯内置类型**，这是两行必须连用的根本原因
+- 绕不开时的兜底：`json.dumps(obj, default=str)` —— 遇到不认识的对象调用 `default` 函数（s12_code.py:168 就用 `default=str` 兜底）
+
+### `json.dumps(obj, indent=2)` — 序列化成字符串
+
+- `dumps` = dump + string：Python 对象 → JSON 字符串；`json.loads` 是反向
+- **`indent=2`** 是关键字参数，把输出格式化成多行可读 JSON（每层缩进 2 空格）：
+
+```json
+{
+  "id": "task_1",
+  "subject": "写报告",
+  "blockedBy": [
+    "task_0"
+  ]
+}
+```
+
+- 不写 `indent` → 单行紧凑版 `{"id": "task_1", ...}`，省空间但不可读
+- 类型映射：dict→`{}`、list→`[]`、`str`→`"..."`、`int/float`→数字、`bool`→`true/false`、`None`→`null`（Python 的 `True/None` 会被转成 JSON 小写形式）
+- **`ensure_ascii` 默认 `True`**：非 ASCII 字符转成 `\uXXXX` 转义（上面输出里 `写报告` 就是「写报告」）。想要文件里直接存中文原文 → `ensure_ascii=False`
+- 反序列化后类型核对：`json.loads` 读回来 `null` 是 `None`、`true` 是 `True` —— 与 Python 不同，JSON 布尔/空值是小写
+
+### `Path.write_text(...)` — 一步到位的文件写入
+
+```python
+_task_path(task.id)             # Path 对象，见 _task_path(): TASKS_DIR / f"{task_id}.json"
+    .write_text(字符串, encoding="utf-8")
+```
+
+- 等价于 `open(path, "w").write(...)` + `close()`，但 **open/close 自动管理**，一条语句完事
+- 编码默认 UTF-8（`encoding` 可覆盖）
+- `Path` 读写兄弟：`read_text()`（s12_code.py:85/89 读回）、`exists()`（:104 判断依赖存在）、`mkdir()`（:49 建目录）、`glob("task_*.json")`（:90 枚举匹配文件）
+
+### 反向：怎么读回来
+
+```python
+# s12_code.py:85
+Task(**json.loads(_task_path(task_id).read_text()))
+```
+
+把刚才的链条倒着走一遍：
+
+```
+磁盘 ──read_text──▶ str ──json.loads──▶ dict ──Task(**dict)──▶ Task 实例
+```
+
+- `read_text()` — 读出字符串
+- `json.loads()` — JSON 字符串 → dict（与 `dumps` 互逆）
+- `Task(**dict)` — `**` 把 dict 解包成关键字参数（§25），按字段名匹配构造 dataclass
+
+### 联动
+
+- `**` 解包 = §25；`Path` 家族 = §2/§3
+- `dataclass` vs `pydantic BaseModel` 对比 = §21：这里手动 `asdict`/`dumps`/`loads`/`Task(**...)`，pydantic 用 `model_dump()`/`model_dump_json()`/`model_validate()` 一步到位还带校验
+- `ensure_ascii=False, default=str` 的兜底写法在 s12_code.py:168 出现过

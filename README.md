@@ -167,12 +167,12 @@ The loop is constant. Tools, knowledge, and permissions change. Agent = Model (L
 
 This repository currently contains two tutorial tracks:
 
-- **Current track: root-level `s01-s20`**
-  The root-level `s01_*` ... `s20_*` folders are the new canonical version. Each chapter contains a full narrative README, translations, runnable `sXX_code.py`, and diagrams where needed.
+- **Current track: root-level `s01-s21`**
+  The root-level `s01_*` ... `s21_*` folders are the new canonical version. Each chapter contains a full narrative README, translations, runnable `sXX_code.py`, and diagrams where needed.
 - **Legacy transition track: `docs/`, `agents/`, and the current `web/` app**
-  These still preserve the older 12-lesson version. They are kept temporarily for existing readers, old links, and the web platform while the new 20-lesson track settles.
+  These still preserve the older 12-lesson version. They are kept temporarily for existing readers, old links, and the web platform while the new 21-lesson track settles.
 
-If you are starting now, read the root-level `s01_agent_loop/` through `s20_comprehensive/` chapters. If you are following an older link or using the current web app, you are likely reading the legacy 12-lesson track. The legacy and current chapter numbers do not always match, so avoid mixing chapter numbers across tracks.
+If you are starting now, read the root-level `s01_agent_loop/` through `s21_context_management/` chapters. If you are following an older link or using the current web app, you are likely reading the legacy 12-lesson track. The legacy and current chapter numbers do not always match, so avoid mixing chapter numbers across tracks.
 
 ### Legacy-to-Current Mapping
 
@@ -251,6 +251,8 @@ The JSONL mailbox protocol in this repository is a teaching implementation, not 
 > **s19** &nbsp; *"Not enough capability? Plug in more via MCP"* &mdash; connect external tools into the same tool pool
 >
 > **s20** &nbsp; *"Many mechanisms, one loop"* &mdash; all previous mechanisms return to one complete harness
+>
+> **s21** &nbsp; *"Don't stuff 72 hours into a finite window — build it so it never has to fit"* &mdash; delegate, bounded ledger, compaction ladder, checkpoint-per-item
 
 ---
 
@@ -327,6 +329,7 @@ flowchart TD
 | [s18](./s18_worktree_isolation/) | Worktree Isolation | `WorktreeRecord` / task-directory binding |
 | [s19](./s19_mcp_plugin/) | MCP Plugin | multi-transport / channel routing / tool pool assembly |
 | [s20](./s20_comprehensive/) | Comprehensive Agent | all mechanisms around one loop |
+| [s21](./s21_context_management/) | Context Management | delegation / bounded ledger / checkpoint resume |
 
 ---
 
@@ -345,7 +348,7 @@ s08_context_compact/
 
 Read the `README.md` for the core idea and work through the code. Complex chapters have `<details>` folds for deep dives -- open them when you want to go deeper. Simple chapters have 0-1 diagrams, complex chapters have more.
 
-Read from s01 through s20 in order. Each chapter assumes you've read the previous ones and ends with a hook into the next.
+Read from s01 through s21 in order. Each chapter assumes you've read the previous ones and ends with a hook into the next.
 
 ---
 
@@ -362,6 +365,7 @@ cp .env.example .env   # configure ANTHROPIC_API_KEY
 python s01_agent_loop/s01_code.py    # Start here -- one loop + bash
 python s08_context_compact/s08_code.py   # Context compaction (complex)
 python s20_comprehensive/s20_code.py     # Endpoint: all mechanisms in one loop
+python s21_context_management/s21_code.py   # Context management: a task that runs 3 days
 ```
 
 ### Legacy 12-Lesson Track
@@ -396,6 +400,7 @@ learn-claude-code/
   ...
   s19_mcp_plugin/
   s20_comprehensive/       # endpoint chapter
+  s21_context_management/  # context management: delegation + bounded ledger + checkpoint
   agents/                  # legacy 12 runnable copies + s_full.py
   skills/                  # skill files used by s07
   docs/                    # legacy 12-lesson docs, kept during transition
